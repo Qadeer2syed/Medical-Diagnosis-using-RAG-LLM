@@ -1,0 +1,84 @@
+# models/generator.py
+
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.dirname(__file__) + "/.."))
+import torch
+from models.load_model import model, tokenizer
+from models.retriever import retrieve_documents
+from langchain.prompts import PromptTemplate
+
+def generate_answer(query):
+    # Retrieve documents: top 3 from each dataset
+    pmc_docs, pubmed_docs = retrieve_documents(query, top_k=2)
+    
+    # Combine retrieved documents into a single context
+    context = "\n".join([
+        f"● {doc['title']}: {doc['abstract'][:1000]}..." for doc in pmc_docs + pubmed_docs
+    ])[:4000]  # Limit context length
+
+    # Define the prompt using LangChain's PromptTemplate
+    prompt_template = PromptTemplate(
+        input_variables=["query", "context"],
+        template="""
+        You are a highly skilled medical diagnostic AI. Based on the provided context, respond to the query.
+         Instructions:
+        - Only provide the final answer in the format: "Final Answer: [Option Letter] - [Explanation]".
+        - Do not repeat the query or context in the response.
+        - Provide a concise diagnosis and reasoning.
+
+        
+        Query: {query}
+
+        Context:
+        {context
+
+       Instructions:
+        - Only provide the final answer in the format: "Final Answer: [Option Letter] - [Explanation]".
+        - Do not repeat the query or context in the response.
+        - Provide a concise diagnosis and reasoning.
+
+        RESPONSE:
+       # """
+    )
+
+    prompt = prompt_template.format(query=query, context=context)
+
+    # Determine device: use GPU if available, else CPU.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=4096,
+        padding="max_length"
+    )
+    input_ids = inputs.input_ids.to(device)
+    attention_mask = inputs.attention_mask.to(device)
+
+    # Generate output
+    with torch.no_grad():
+        output = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=500,
+            do_sample=False,
+            temperature=0.2,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    # Decode the generated tokens
+    output_text = tokenizer.decode(output[0], skip_special_tokens=True)
+
+    # Extract the answer using LangChain's pattern recognition capabilities
+    if "Final Answer:" in output_text:
+        answer = output_text.split("Final Answer:")[-1].strip()
+    else:
+        answer = "No valid answer generated."
+
+    return answer
+
+if __name__ == "__main__":
+    query = input("Enter your medical query: ")
+    print("\nGenerated Answer:\n", generate_answer(query))
